@@ -1,0 +1,81 @@
+name: build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  native:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build native binary
+        run: cargo build --manifest-path native/Cargo.toml --release
+      - name: Stage Linux package
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/bin
+          cp native/target/release/discord_client_controls dist/bin/discord-client-controls
+      - name: Stage Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/bin | Out-Null
+          Copy-Item native/target/release/discord_client_controls.exe dist/bin/discord-client-controls.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: discord-client-controls-${{ runner.os }}
+          path: dist/bin
+
+  package:
+    needs: native
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: discord-client-controls-Linux
+          path: artifacts/linux
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: discord-client-controls-Windows
+          path: artifacts/windows
+
+      - name: Assemble plugin package
+        run: |
+          set -euo pipefail
+          PACKAGE_ROOT="dist/com.jomi.discord.sdPlugin"
+          mkdir -p "$PACKAGE_ROOT/bin" "$PACKAGE_ROOT/imgs" "$PACKAGE_ROOT/ui"
+
+          cp manifest.json "$PACKAGE_ROOT/manifest.json"
+          cp artifacts/linux/discord-client-controls "$PACKAGE_ROOT/bin/discord-client-controls"
+          cp artifacts/windows/discord-client-controls.exe "$PACKAGE_ROOT/bin/discord-client-controls.exe"
+          cp imgs/*.png "$PACKAGE_ROOT/imgs/"
+          cp ui/voice-channel.html "$PACKAGE_ROOT/ui/voice-channel.html"
+          cp ui/voice-channel.js "$PACKAGE_ROOT/ui/voice-channel.js"
+
+      - name: Create distributable zip
+        run: |
+          set -euo pipefail
+          cd dist
+          zip -r com.jomi.discord.sdPlugin.zip com.jomi.discord.sdPlugin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: com.jomi.discord.sdPlugin
+          path: dist/com.jomi.discord.sdPlugin.zip
+
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/com.jomi.discord.sdPlugin.zip
+          generate_release_notes: true

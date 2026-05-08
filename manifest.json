@@ -1,0 +1,47 @@
+{
+  "Author": "Josh",
+  "Name": "Discord Client Controls",
+  "Description": "Control the local Discord client from OpenDeck with native Rust actions.",
+  "Category": "Discord",
+  "CategoryIcon": "imgs/category-icon",
+  "Icon": "imgs/plugin-icon",
+  "CodePath": "bin/discord-client-controls",
+  "CodePathWin": "bin/discord-client-controls.exe",
+  "CodePathLinux": "bin/discord-client-controls",
+  "UUID": "com.jomi.discord",
+  "Version": "0.1.0.0",
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "6.4"
+  },
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    },
+    {
+      "Platform": "linux",
+      "MinimumVersion": "0"
+    }
+  ],
+  "Actions": [
+    {
+      "Name": "Voice Channel",
+      "UUID": "com.jomi.discord.voice-channel",
+      "Icon": "imgs/voice-action",
+      "Tooltip": "Join a configured Discord voice channel in the local client.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/voice-channel.html",
+      "States": [
+        {
+          "Image": "imgs/voice-key",
+          "Title": "Voice\nChannel",
+          "TitleAlignment": "bottom",
+          "ShowTitle": true
+        }
+      ]
+    }
+  ]
+}

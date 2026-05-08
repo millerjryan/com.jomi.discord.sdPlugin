@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 144 144">
+  <defs>
+    <linearGradient id="wave" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#79c4ff" />
+      <stop offset="100%" stop-color="#2b8ef6" />
+    </linearGradient>
+  </defs>
+  <rect width="144" height="144" rx="28" fill="#101722" />
+  <path d="M72 30c12 0 22 10 22 22v16c0 12-10 22-22 22S50 80 50 68V52c0-12 10-22 22-22z" fill="url(#wave)" />
+  <path d="M42 68c0 17 13 30 30 30s30-13 30-30" fill="none" stroke="#dff1ff" stroke-width="10" stroke-linecap="round" />
+  <path d="M72 98v16" stroke="#dff1ff" stroke-width="10" stroke-linecap="round" />
+  <path d="M108 46c8 8 13 18 13 30s-5 22-13 30" fill="none" stroke="#2b8ef6" stroke-width="8" stroke-linecap="round" />
+  <path d="M36 46c-8 8-13 18-13 30s5 22 13 30" fill="none" stroke="#2b8ef6" stroke-width="8" stroke-linecap="round" />
+</svg>
