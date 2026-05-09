@@ -36,6 +36,9 @@ jobs:
   package:
     needs: native
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
 
     steps:
       - uses: actions/checkout@v4
