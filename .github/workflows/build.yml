@@ -57,14 +57,13 @@ jobs:
         run: |
           set -euo pipefail
           PACKAGE_ROOT="dist/com.jomi.discord.sdPlugin"
-          mkdir -p "$PACKAGE_ROOT/bin" "$PACKAGE_ROOT/imgs" "$PACKAGE_ROOT/ui"
+          mkdir -p "$PACKAGE_ROOT/bin"
 
           cp manifest.json "$PACKAGE_ROOT/manifest.json"
           cp artifacts/linux/discord-client-controls "$PACKAGE_ROOT/bin/discord-client-controls"
           cp artifacts/windows/discord-client-controls.exe "$PACKAGE_ROOT/bin/discord-client-controls.exe"
-          cp imgs/*.png "$PACKAGE_ROOT/imgs/"
-          cp ui/voice-channel.html "$PACKAGE_ROOT/ui/voice-channel.html"
-          cp ui/voice-channel.js "$PACKAGE_ROOT/ui/voice-channel.js"
+          cp -a imgs "$PACKAGE_ROOT/imgs"
+          cp -a ui "$PACKAGE_ROOT/ui"
 
       - name: Create distributable zip
         run: |
