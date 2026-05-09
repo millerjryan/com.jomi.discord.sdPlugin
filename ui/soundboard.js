@@ -5,14 +5,12 @@ let context = "";
 let action = "";
 let settings = {};
 let globalSettings = {};
+let allSounds = [];
 let guilds = [];
-let channels = [];
-let channelsGuildId = "";
+let soundsForSelectedGuild = [];
 let autoLoadedAuthorizedState = false;
-let guildRequestInFlight = false;
-let guildRequestTimeoutId = null;
-let channelsRequestGuildId = "";
-let channelsRequestTimeoutId = null;
+let soundsRequestInFlight = false;
+let soundsRequestTimeoutId = null;
 let debugLines = [];
 
 const REQUEST_TIMEOUT_MS = 30000;
@@ -21,7 +19,7 @@ const clientIdInput = () => document.getElementById("client-id");
 const clientSecretInput = () => document.getElementById("client-secret");
 const redirectUriInput = () => document.getElementById("redirect-uri");
 const guildSelect = () => document.getElementById("guild-select");
-const channelSelect = () => document.getElementById("channel-select");
+const soundSelect = () => document.getElementById("sound-select");
 const statusBox = () => document.getElementById("status");
 const debugLogBox = () => document.getElementById("debug-log");
 
@@ -31,22 +29,6 @@ function buildCredentialPayload() {
     clientSecret: clientSecretInput().value.trim(),
     redirectUri: redirectUriInput().value.trim() || "http://localhost",
   };
-}
-
-function resolveGuildIconUrl(guild) {
-  if (!guild) {
-    return "";
-  }
-
-  if (guild.iconUrl) {
-    return guild.iconUrl;
-  }
-
-  if (guild.icon) {
-    return `https://cdn.discordapp.com/icons/${guild.id}/${guild.icon}.png?size=128`;
-  }
-
-  return "";
 }
 
 function connectElgatoStreamDeckSocket(inPort, inUUID, inRegisterEvent, inInfo, inActionInfo) {
@@ -74,7 +56,6 @@ function connectElgatoStreamDeckSocket(inPort, inUUID, inRegisterEvent, inInfo, 
     if (message.event === "didReceiveSettings") {
       settings = (message.payload && message.payload.settings) || {};
       hydrateActionSettings();
-      maybeLoadChannelsForSelectedGuild();
       return;
     }
 
@@ -110,70 +91,81 @@ function bindUi() {
 
   document.getElementById("connect-discord").addEventListener("click", () => {
     if (globalSettings.isAuthorized) {
-      requestGuilds("Using existing Discord authorization...");
+      requestSounds("Using existing Discord authorization...");
       return;
     }
 
     const creds = buildCredentialPayload();
     if (!creds.clientId.trim() || !creds.clientSecret.trim()) {
-      setStatus("Error: Client ID and Client Secret are required. Please enter them and click Save Credentials first.", "error");
+      setStatus(
+        "Error: Client ID and Client Secret are required. Please enter them and click Save Credentials first.",
+        "error",
+      );
       return;
     }
 
     setStatus("Opening Discord authorization if needed...", "");
-    clearGuildRequestTimeout();
-    guildRequestInFlight = true;
-    guildRequestTimeoutId = setTimeout(() => {
-      guildRequestInFlight = false;
+    clearSoundsRequestTimeout();
+    soundsRequestInFlight = true;
+    soundsRequestTimeoutId = setTimeout(() => {
+      soundsRequestInFlight = false;
       setStatus("Discord authorization timed out. Please try Connect Discord again.", "error");
     }, REQUEST_TIMEOUT_MS);
+
     sendToPlugin({
       type: "connectDiscord",
       ...creds,
     });
   });
 
-  document.getElementById("refresh-servers").addEventListener("click", () => {
-    requestGuilds("Refreshing Discord servers...");
+  document.getElementById("refresh-sounds").addEventListener("click", () => {
+    requestSounds("Refreshing Discord soundboard sounds...");
   });
 
   guildSelect().addEventListener("change", () => {
-    const selectedGuild = guilds.find((guild) => guild.id === guildSelect().value);
-    const nextGuildId = selectedGuild ? selectedGuild.id : "";
-    const guildChanged = (settings.guildId || "") !== nextGuildId;
-    const guildIconUrl = resolveGuildIconUrl(selectedGuild);
-
-    updateActionSettings({
-      guildId: nextGuildId,
-      guildName: selectedGuild ? selectedGuild.name : "",
-      guildIconUrl,
-      channelId: guildChanged ? "" : settings.channelId || "",
-      channelName: guildChanged ? "" : settings.channelName || "",
-    });
-
-    appendDebugLog(
-      `resolved guild icon URL for ${selectedGuild ? selectedGuild.name : "(none)"}: ${guildIconUrl || "(empty)"}`,
-    );
+    const selectedGuildId = guildSelect().value;
+    const selectedGuild = guilds.find((guild) => guild.id === selectedGuildId);
 
     if (!selectedGuild) {
-      clearChannelsRequestTimeout();
-      channelsRequestGuildId = "";
-      channelsGuildId = "";
-      replaceSelectOptions(channelSelect(), [{ value: "", label: "Choose a server first" }]);
+      soundsForSelectedGuild = [];
+      replaceSelectOptions(soundSelect(), [{ value: "", label: "Choose a server first" }]);
+      appendDebugLog("[Guild Change] No guild selected");
       return;
     }
 
-    requestChannelsForGuild(selectedGuild.id, selectedGuild.name);
+    soundsForSelectedGuild = allSounds.filter((sound) => sound.guildId === selectedGuildId);
+    appendDebugLog(`[Guild Change] Selected guild: ${selectedGuildId} (${selectedGuild.name})`);
+    appendDebugLog(`[Guild Change] Total sounds available: ${allSounds.length}`);
+    appendDebugLog(`[Guild Change] Sounds for selected guild: ${soundsForSelectedGuild.length}`);
+    appendDebugLog(`[Guild Change] Filtered list: ${summarizeSounds(soundsForSelectedGuild)}`);
+    
+    replaceSelectOptions(
+      soundSelect(),
+      soundsForSelectedGuild.length
+        ? soundsForSelectedGuild.map((sound) => ({ value: sound.soundId, label: sound.soundName }))
+        : [{ value: "", label: "No sounds in this server" }],
+    );
+
+    if (settings.guildId === selectedGuildId && settings.soundId) {
+      soundSelect().value = settings.soundId;
+    }
   });
 
-  channelSelect().addEventListener("change", () => {
-    const selectedChannel = channels.find((channel) => channel.id === channelSelect().value);
-    updateActionSettings({
-      channelId: selectedChannel ? selectedChannel.id : "",
-      channelName: selectedChannel ? selectedChannel.name : "",
-    });
-    if (selectedChannel) {
-      setStatus(`Selected ${selectedChannel.name}.`, "success");
+  soundSelect().addEventListener("change", () => {
+    const selectedSoundId = soundSelect().value;
+    const selectedSound = soundsForSelectedGuild.find((s) => s.soundId === selectedSoundId);
+
+    if (selectedSound) {
+      appendDebugLog(
+        `[Sound Change] Selected sound: ${selectedSound.soundId} (${selectedSound.soundName}) in guild ${selectedSound.guildId}`,
+      );
+      updateActionSettings({
+        guildId: selectedSound.guildId,
+        guildName: selectedSound.guildName,
+        soundId: selectedSound.soundId,
+        soundName: selectedSound.soundName,
+      });
+      setStatus(`Selected ${selectedSound.soundName}.`, "success");
     }
   });
 }
@@ -187,82 +179,51 @@ function handlePluginMessage(payload) {
     return;
   }
 
-  if (payload.type === "guilds") {
-    clearGuildRequestTimeout();
-    guildRequestInFlight = false;
-    guilds = Array.isArray(payload.guilds) ? payload.guilds : [];
+  if (payload.type === "soundboardSounds") {
+    clearSoundsRequestTimeout();
+    soundsRequestInFlight = false;
+    allSounds = Array.isArray(payload.sounds) ? payload.sounds : [];
+
+    appendDebugLog("[Plugin Message] Received soundboardSounds");
+    appendDebugLog(`[Plugin Message] Total sounds: ${allSounds.length}`);
+    appendDebugLog(`[Plugin Message] Sound list: ${summarizeSounds(allSounds)}`);
+    
+    // Extract unique guilds from sounds
+    const guildMap = new Map();
+    allSounds.forEach((sound) => {
+      if (!guildMap.has(sound.guildId)) {
+        guildMap.set(sound.guildId, { id: sound.guildId, name: sound.guildName || "Unknown Server" });
+      }
+    });
+    guilds = Array.from(guildMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+    appendDebugLog(`[Plugin Message] Guilds: ${summarizeGuilds(guilds)}`);
+
     replaceSelectOptions(
       guildSelect(),
       guilds.length
         ? guilds.map((guild) => ({ value: guild.id, label: guild.name }))
-        : [{ value: "", label: "No servers returned" }],
+        : [{ value: "", label: "No servers with sounds" }],
     );
 
-    if (guilds.length) {
-      appendDebugLog(
-        `first guild icon payload: iconUrl='${guilds[0].iconUrl || ""}' icon='${guilds[0].icon || ""}'`,
-      );
-    }
-
-    if (settings.guildId) {
+    if (settings.guildId && guilds.find((g) => g.id === settings.guildId)) {
       guildSelect().value = settings.guildId;
+      guildSelect().dispatchEvent(new Event("change"));
+    } else if (guilds.length) {
+      guildSelect().value = guilds[0].id;
+      guildSelect().dispatchEvent(new Event("change"));
     }
 
-    maybeLoadChannelsForSelectedGuild();
-
-    setStatus(`Loaded ${guilds.length} server${guilds.length === 1 ? "" : "s"}.`, "success");
-    return;
-  }
-
-  if (payload.type === "channels") {
-    clearChannelsRequestTimeout();
-    channels = Array.isArray(payload.channels) ? payload.channels : [];
-    channelsGuildId = payload.guildId || "";
-    channelsRequestGuildId = "";
-    replaceSelectOptions(
-      channelSelect(),
-      channels.length
-        ? channels.map((channel) => ({ value: channel.id, label: channel.name }))
-        : [{ value: "", label: "No voice channels returned" }],
-    );
-
-    if (settings.channelId) {
-      channelSelect().value = settings.channelId;
-    }
-
-    const selectedChannel =
-      channels.find((channel) => channel.id === channelSelect().value) ||
-      channels[0] ||
-      null;
-
-    if (selectedChannel) {
-      channelSelect().value = selectedChannel.id;
-      if ((settings.channelId || "") !== selectedChannel.id) {
-        updateActionSettings({
-          channelId: selectedChannel.id,
-          channelName: selectedChannel.name || "",
-        });
-      }
-    } else if (settings.channelId || settings.channelName) {
-      updateActionSettings({
-        channelId: "",
-        channelName: "",
-      });
-    }
-
-    setStatus(`Loaded ${channels.length} voice channel${channels.length === 1 ? "" : "s"}.`, "success");
+    setStatus(`Loaded ${allSounds.length} soundboard sound${allSounds.length === 1 ? "" : "s"} from ${guilds.length} server${guilds.length === 1 ? "" : "s"}.`, "success");
     return;
   }
 
   if (payload.type === "status") {
-    const level = payload.level || "";
-    if (level === "error") {
-      clearGuildRequestTimeout();
-      guildRequestInFlight = false;
-      clearChannelsRequestTimeout();
-      channelsRequestGuildId = "";
+    if ((payload.level || "") === "error") {
+      clearSoundsRequestTimeout();
+      soundsRequestInFlight = false;
     }
     setStatus(payload.message || "", payload.level || "");
+    return;
   }
 
   if (payload.type === "log") {
@@ -299,85 +260,45 @@ function maybeAutoLoadAuthorizedState() {
   }
 
   autoLoadedAuthorizedState = true;
-  requestGuilds("Refreshing Discord servers...");
+  requestSounds("Refreshing Discord soundboard sounds...");
 }
 
 function hydrateActionSettings() {
-  if (settings.guildId) {
+  if (!settings.guildId || !settings.soundId) {
+    return;
+  }
+
+  if (guilds.find((g) => g.id === settings.guildId)) {
     guildSelect().value = settings.guildId;
-  }
-  if (settings.channelId) {
-    channelSelect().value = settings.channelId;
+    guildSelect().dispatchEvent(new Event("change"));
+    setTimeout(() => {
+      soundSelect().value = settings.soundId;
+    }, 0);
   }
 }
 
-function maybeLoadChannelsForSelectedGuild() {
-  if (!settings.guildId) {
-    return;
-  }
-
-  if (guildSelect().value !== settings.guildId) {
-    return;
-  }
-
-  if (channelsGuildId === settings.guildId) {
-    return;
-  }
-
-  const selectedGuild = guilds.find((guild) => guild.id === settings.guildId);
-  requestChannelsForGuild(settings.guildId, selectedGuild ? selectedGuild.name : "selected server");
-}
-
-function requestGuilds(message) {
-  if (guildRequestInFlight) {
+function requestSounds(message) {
+  if (soundsRequestInFlight) {
     return;
   }
 
   setStatus(message, "");
-  guildRequestInFlight = true;
-  clearGuildRequestTimeout();
-  guildRequestTimeoutId = setTimeout(() => {
-    guildRequestInFlight = false;
-    setStatus("Timed out while loading Discord servers. Try Refresh Servers again.", "error");
+  soundsRequestInFlight = true;
+  clearSoundsRequestTimeout();
+  soundsRequestTimeoutId = setTimeout(() => {
+    soundsRequestInFlight = false;
+    setStatus("Timed out while loading soundboard sounds. Try Refresh Sounds again.", "error");
   }, REQUEST_TIMEOUT_MS);
-  sendToPlugin({ type: "loadGuilds" });
+  sendToPlugin({ type: "loadSoundboardSounds" });
 }
 
-function requestChannelsForGuild(guildId, guildName) {
-  if (!guildId) {
+function clearSoundsRequestTimeout() {
+  if (!soundsRequestTimeoutId) {
     return;
   }
 
-  if (channelsRequestGuildId === guildId) {
-    return;
-  }
-
-  channelsRequestGuildId = guildId;
-  clearChannelsRequestTimeout();
-  setStatus(`Loading channels for ${guildName}...`, "");
-  channelsRequestTimeoutId = setTimeout(() => {
-    channelsRequestGuildId = "";
-    setStatus(`Timed out while loading channels for ${guildName}.`, "error");
-  }, REQUEST_TIMEOUT_MS);
-  sendToPlugin({ type: "loadChannels", guildId });
-}
-
-function clearGuildRequestTimeout() {
-  if (!guildRequestTimeoutId) {
-    return;
-  }
-
-  clearTimeout(guildRequestTimeoutId);
-  guildRequestTimeoutId = null;
-}
-
-function clearChannelsRequestTimeout() {
-  if (!channelsRequestTimeoutId) {
-    return;
-  }
-
-  clearTimeout(channelsRequestTimeoutId);
-  channelsRequestTimeoutId = null;
+  clearTimeout(soundsRequestTimeoutId);
+  soundsRequestTimeoutId = null;
 }
 
 function requestGlobalSettings() {
@@ -387,12 +308,11 @@ function requestGlobalSettings() {
 function updateActionSettings(patch) {
   settings = { ...settings, ...patch };
   sendToPlugin({
-    type: "saveActionSettings",
+    type: "saveSoundboardSettings",
     guildId: settings.guildId || "",
     guildName: settings.guildName || "",
-    guildIconUrl: settings.guildIconUrl || "",
-    channelId: settings.channelId || "",
-    channelName: settings.channelName || "",
+    soundId: settings.soundId || "",
+    soundName: settings.soundName || "",
   });
 }
 
@@ -443,6 +363,29 @@ function appendDebugLog(line) {
 
   box.textContent = debugLines.join("\n");
   box.scrollTop = box.scrollHeight;
+}
+
+function summarizeSounds(sounds) {
+  if (!Array.isArray(sounds) || sounds.length === 0) {
+    return "none";
+  }
+
+  const preview = sounds
+    .slice(0, 15)
+    .map((sound) => `${sound.guildId || "?"}:${sound.soundId || "?"}:${sound.soundName || "(unnamed)"}`)
+    .join(" | ");
+  if (sounds.length > 15) {
+    return `${preview} | ... (+${sounds.length - 15} more)`;
+  }
+  return preview;
+}
+
+function summarizeGuilds(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return "none";
+  }
+
+  return entries.map((guild) => `${guild.id || "?"}:${guild.name || "(unnamed)"}`).join(" | ");
 }
 
 function safeJson(value) {

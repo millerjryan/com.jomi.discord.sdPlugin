@@ -2,12 +2,16 @@ mod discord_rpc;
 mod models;
 mod stream_deck;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use models::{ChannelSummary, GlobalSettings, GuildSummary, VoiceChannelSettings};
+use models::{
+    ChannelSummary, GlobalSettings, GuildSummary, SoundboardSettings, SoundboardSoundSummary,
+    VoiceChannelSettings,
+};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -16,6 +20,11 @@ use tokio::sync::Mutex;
 use crate::discord_rpc::DiscordRpcClient;
 use crate::stream_deck::StreamDeckClient;
 
+const VOICE_ACTION_UUID: &str = "com.jomi.discord.voice-channel";
+const SCREENSHARE_ACTION_UUID: &str = "com.jomi.discord.screenshare";
+const SOUNDBOARD_ACTION_UUID: &str = "com.jomi.discord.soundboard";
+const SCREENSHARE_DEBOUNCE: Duration = Duration::from_millis(220);
+
 #[derive(Clone, Default)]
 struct ActionState {
     action_uuid: String,
@@ -23,11 +32,27 @@ struct ActionState {
     connected: bool,
 }
 
+#[derive(Clone, Default)]
+struct ScreenshareActionState {
+    action_uuid: String,
+    is_sharing: bool,
+    in_flight: bool,
+    last_toggle_at: Option<Instant>,
+}
+
+#[derive(Clone, Default)]
+struct SoundboardActionState {
+    action_uuid: String,
+    settings: SoundboardSettings,
+}
+
 #[derive(Clone)]
 struct PluginState {
     stream_deck: StreamDeckClient,
     global_settings: std::sync::Arc<Mutex<GlobalSettings>>,
     actions: std::sync::Arc<Mutex<HashMap<String, ActionState>>>,
+    screenshare_actions: std::sync::Arc<Mutex<HashMap<String, ScreenshareActionState>>>,
+    soundboard_actions: std::sync::Arc<Mutex<HashMap<String, SoundboardActionState>>>,
     rpc_client: std::sync::Arc<Mutex<Option<DiscordRpcClient>>>,
     icon_cache: std::sync::Arc<Mutex<HashMap<String, String>>>,
 }
@@ -57,6 +82,7 @@ enum PropertyInspectorRequest {
         #[serde(rename = "guildId", alias = "guild_id")]
         guild_id: String,
     },
+    LoadSoundboardSounds,
     SaveActionSettings {
         #[serde(rename = "guildId", alias = "guild_id", default)]
         guild_id: String,
@@ -68,6 +94,16 @@ enum PropertyInspectorRequest {
         channel_id: String,
         #[serde(rename = "channelName", alias = "channel_name", default)]
         channel_name: String,
+    },
+    SaveSoundboardSettings {
+        #[serde(rename = "guildId", alias = "guild_id", default)]
+        guild_id: String,
+        #[serde(rename = "guildName", alias = "guild_name", default)]
+        guild_name: String,
+        #[serde(rename = "soundId", alias = "sound_id", default)]
+        sound_id: String,
+        #[serde(rename = "soundName", alias = "sound_name", default)]
+        sound_name: String,
     },
 }
 
@@ -88,6 +124,8 @@ async fn main() -> Result<()> {
         stream_deck,
         global_settings: std::sync::Arc::new(Mutex::new(GlobalSettings::default())),
         actions: std::sync::Arc::new(Mutex::new(HashMap::new())),
+        screenshare_actions: std::sync::Arc::new(Mutex::new(HashMap::new())),
+        soundboard_actions: std::sync::Arc::new(Mutex::new(HashMap::new())),
         rpc_client: std::sync::Arc::new(Mutex::new(None)),
         icon_cache: std::sync::Arc::new(Mutex::new(HashMap::new())),
     };
@@ -97,6 +135,8 @@ async fn main() -> Result<()> {
             eprintln!("plugin error: {error:#}");
         }
     }
+
+    state.shutdown().await;
 
     Ok(())
 }
@@ -121,11 +161,26 @@ impl PluginState {
                         .unwrap_or_else(|| json!({})),
                 )
                 .unwrap_or_default();
+                let changed = {
+                    let current = self.global_settings.lock().await;
+                    current.client_id != settings.client_id
+                        || current.client_secret != settings.client_secret
+                        || current.redirect_uri != settings.redirect_uri
+                        || current.access_token != settings.access_token
+                };
 
                 *self.global_settings.lock().await = settings;
+
+                if changed {
+                    eprintln!("global settings changed; refreshing Discord RPC client state");
+                    self.clear_rpc_client().await;
+                }
             }
             "keyDown" => {
                 self.handle_key_down(&message).await?;
+            }
+            "keyUp" => {
+                self.handle_key_up(&message).await?;
             }
             "sendToPlugin" => {
                 if let Err(error) = self.handle_property_inspector_message(&message).await {
@@ -144,6 +199,54 @@ impl PluginState {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("missing context"))?
             .to_owned();
+        let action_uuid = message
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+
+        if action_uuid == SCREENSHARE_ACTION_UUID {
+            self.screenshare_actions.lock().await.insert(
+                context.clone(),
+                ScreenshareActionState {
+                    action_uuid,
+                    is_sharing: false,
+                    in_flight: false,
+                    last_toggle_at: None,
+                },
+            );
+            self.stream_deck.set_state(&context, 0).await?;
+            return Ok(());
+        }
+
+        if action_uuid == SOUNDBOARD_ACTION_UUID {
+            let settings = serde_json::from_value::<SoundboardSettings>(
+                message
+                    .get("payload")
+                    .and_then(|payload| payload.get("settings"))
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            )
+            .unwrap_or_default();
+
+            self.soundboard_actions.lock().await.insert(
+                context.clone(),
+                SoundboardActionState {
+                    action_uuid,
+                    settings: settings.clone(),
+                },
+            );
+
+            self.stream_deck
+                .set_title(&context, &settings.button_title())
+                .await?;
+            return Ok(());
+        }
+
+        if action_uuid != VOICE_ACTION_UUID {
+            return Ok(());
+        }
+
         let settings = serde_json::from_value::<VoiceChannelSettings>(
             message
                 .get("payload")
@@ -156,11 +259,7 @@ impl PluginState {
         self.actions.lock().await.insert(
             context.clone(),
             ActionState {
-                action_uuid: message
-                    .get("action")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
+                action_uuid,
                 settings: settings.clone(),
                 connected: false,
             },
@@ -178,14 +277,22 @@ impl PluginState {
     }
 
     async fn handle_key_down(&self, message: &Value) -> Result<()> {
-        let context = message
-            .get("context")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("missing context"))?;
         let action_uuid = message
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        match action_uuid {
+            VOICE_ACTION_UUID => {}
+            SOUNDBOARD_ACTION_UUID => {
+                return self.handle_soundboard_key_down(message).await;
+            }
+            _ => return Ok(()),
+        }
+
+        let context = message
+            .get("context")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing context"))?;
         let action_state = self
             .actions
             .lock()
@@ -255,6 +362,186 @@ impl PluginState {
         Ok(())
     }
 
+    async fn handle_soundboard_key_down(&self, message: &Value) -> Result<()> {
+        let action_uuid = message
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let context = message
+            .get("context")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing context"))?;
+
+        let action_state = self
+            .soundboard_actions
+            .lock()
+            .await
+            .get(context)
+            .cloned()
+            .unwrap_or_else(|| SoundboardActionState {
+                action_uuid: action_uuid.to_owned(),
+                settings: serde_json::from_value::<SoundboardSettings>(
+                    message
+                        .get("payload")
+                        .and_then(|payload| payload.get("settings"))
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                )
+                .unwrap_or_default(),
+            });
+
+        if action_state.settings.guild_id.trim().is_empty()
+            || action_state.settings.sound_id.trim().is_empty()
+        {
+            self.send_pi_log(action_uuid, context, "soundboard: keyDown aborted, no sound selected")
+                .await?;
+            self.stream_deck.show_alert(context).await?;
+            return Ok(());
+        }
+
+        if let Err(error) = self
+            .rpc_play_soundboard_sound(
+                &action_state.settings.guild_id,
+                &action_state.settings.sound_id,
+            )
+            .await
+        {
+            let error_message = format!("Soundboard playback failed: {error:#}");
+            eprintln!("{error_message}");
+            self.show_action_error(context, Some(action_uuid), &error_message)
+                .await?;
+            return Ok(());
+        }
+
+        self.send_pi_log(
+            action_uuid,
+            context,
+            &format!(
+                "soundboard: played '{}' ({})",
+                action_state.settings.sound_name, action_state.settings.sound_id
+            ),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn handle_key_up(&self, message: &Value) -> Result<()> {
+        let action_uuid = message
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if action_uuid != SCREENSHARE_ACTION_UUID {
+            return Ok(());
+        }
+
+        let context = message
+            .get("context")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing context"))?
+            .to_owned();
+
+        let mut ignore_log: Option<&'static str> = None;
+        let (was_sharing, action_uuid_owned) = {
+            let mut actions = self.screenshare_actions.lock().await;
+            let state = actions
+                .entry(context.clone())
+                .or_insert_with(|| ScreenshareActionState {
+                    action_uuid: action_uuid.to_owned(),
+                    is_sharing: false,
+                    in_flight: false,
+                    last_toggle_at: None,
+                });
+
+            let now = Instant::now();
+            if state.in_flight {
+                ignore_log = Some("screenshare: ignored keyUp while toggle is in flight");
+                (state.is_sharing, state.action_uuid.clone())
+            } else if let Some(last_toggle_at) = state.last_toggle_at {
+                if now.duration_since(last_toggle_at) < SCREENSHARE_DEBOUNCE {
+                    ignore_log = Some("screenshare: ignored rapid repeated keyUp");
+                    (state.is_sharing, state.action_uuid.clone())
+                } else {
+                    state.in_flight = true;
+                    state.last_toggle_at = Some(now);
+                    (state.is_sharing, state.action_uuid.clone())
+                }
+            } else {
+                state.in_flight = true;
+                state.last_toggle_at = Some(now);
+                (state.is_sharing, state.action_uuid.clone())
+            }
+        };
+
+        if let Some(message) = ignore_log {
+            self.send_pi_log(action_uuid, &context, message).await?;
+            return Ok(());
+        }
+
+        self.send_pi_log(
+            &action_uuid_owned,
+            &context,
+            "screenshare: sending TOGGLE_SCREENSHARE over Discord IPC",
+        )
+        .await?;
+
+        let toggle_result = self.rpc_toggle_screenshare().await;
+
+        match toggle_result {
+            Ok(()) => {
+                let state_index;
+                {
+                    let mut actions = self.screenshare_actions.lock().await;
+                    let state = actions
+                        .entry(context.clone())
+                        .or_insert_with(|| ScreenshareActionState {
+                            action_uuid: action_uuid_owned.clone(),
+                            is_sharing: false,
+                            in_flight: false,
+                            last_toggle_at: Some(Instant::now()),
+                        });
+                    state.in_flight = false;
+                    state.is_sharing = !was_sharing;
+                    state_index = if state.is_sharing { 1 } else { 0 };
+                }
+
+                self.stream_deck.set_state(&context, state_index).await?;
+
+                self.send_pi_log(
+                    &action_uuid_owned,
+                    &context,
+                    &format!(
+                        "screenshare: toggle success (is_sharing={})",
+                        state_index == 1
+                    ),
+                )
+                .await?;
+            }
+            Err(error) => {
+                {
+                    let mut actions = self.screenshare_actions.lock().await;
+                    let state = actions
+                        .entry(context.clone())
+                        .or_insert_with(|| ScreenshareActionState {
+                            action_uuid: action_uuid_owned.clone(),
+                            is_sharing: false,
+                            in_flight: false,
+                            last_toggle_at: Some(Instant::now()),
+                        });
+                    state.in_flight = false;
+                }
+
+                let error_message = format!("screenshare: toggle failure: {error:#}");
+                eprintln!("{error_message}");
+                self.send_pi_log(&action_uuid_owned, &context, &error_message)
+                    .await?;
+                self.stream_deck.show_alert(&context).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn handle_property_inspector_message(&self, message: &Value) -> Result<()> {
         let context = message
             .get("context")
@@ -268,6 +555,8 @@ impl PluginState {
             .get("payload")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("unknown");
+        eprintln!("property_inspector_message: action='{}' context='{}' type={}", action_uuid, context, payload_type);
         let request: PropertyInspectorRequest = serde_json::from_value(payload)
             .context("invalid property inspector request")?;
 
@@ -345,23 +634,65 @@ impl PluginState {
                 client_secret,
                 redirect_uri,
             } => {
-                let changed = self
-                    .update_credentials(client_id, client_secret, redirect_uri)
-                    .await?;
-                if changed {
-                    self.clear_rpc_client().await;
+                eprintln!("ConnectDiscord handler: processing");
+                let has_any_creds = client_id.as_ref().map_or(false, |c| !c.trim().is_empty())
+                    || client_secret.as_ref().map_or(false, |c| !c.trim().is_empty())
+                    || redirect_uri.as_ref().map_or(false, |c| !c.trim().is_empty());
+
+                if has_any_creds {
+                    eprintln!("ConnectDiscord: updating credentials from request");
+                    let changed = self
+                        .update_credentials(client_id, client_secret, redirect_uri)
+                        .await?;
+                    if changed {
+                        self.clear_rpc_client().await;
+                    }
                 }
-                let guilds = self.rpc_get_guilds().await?;
+
+                let current_settings = self.global_settings.lock().await.clone();
+                eprintln!("ConnectDiscord: checking credentials - client_id_empty={} client_secret_empty={}", current_settings.client_id.trim().is_empty(), current_settings.client_secret.trim().is_empty());
+                if current_settings.client_id.trim().is_empty()
+                    || current_settings.client_secret.trim().is_empty()
+                {
+                    eprintln!("ConnectDiscord: credentials missing, returning error");
+                    self.send_pi_payload(
+                        action_uuid,
+                        context,
+                        json!({
+                            "type": "status",
+                            "level": "error",
+                            "message": "Discord client ID and secret are required. Please enter them in the credentials fields and click Save Credentials first."
+                        }),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                eprintln!("ConnectDiscord: calling rpc_get_guilds");
+
                 let settings = self.global_settings.lock().await.clone();
-                self.send_pi_payload(
-                    action_uuid,
-                    context,
-                    json!({
-                        "type": "guilds",
-                        "guilds": guilds
-                    }),
-                )
-                .await?;
+                if action_uuid == SOUNDBOARD_ACTION_UUID {
+                    let sounds = self.rpc_get_soundboard_sounds().await?;
+                    self.send_pi_payload(
+                        action_uuid,
+                        context,
+                        json!({
+                            "type": "soundboardSounds",
+                            "sounds": sounds
+                        }),
+                    )
+                    .await?;
+                } else {
+                    let guilds = self.rpc_get_guilds().await?;
+                    self.send_pi_payload(
+                        action_uuid,
+                        context,
+                        json!({
+                            "type": "guilds",
+                            "guilds": guilds
+                        }),
+                    )
+                    .await?;
+                }
                 self.send_pi_payload(
                     action_uuid,
                     context,
@@ -408,6 +739,18 @@ impl PluginState {
                         "type": "channels",
                         "guildId": guild_id,
                         "channels": channels
+                    }),
+                )
+                .await?;
+            }
+            PropertyInspectorRequest::LoadSoundboardSounds => {
+                let sounds = self.rpc_get_soundboard_sounds().await?;
+                self.send_pi_payload(
+                    action_uuid,
+                    context,
+                    json!({
+                        "type": "soundboardSounds",
+                        "sounds": sounds
                     }),
                 )
                 .await?;
@@ -472,6 +815,30 @@ impl PluginState {
                     }
                 }
             }
+            PropertyInspectorRequest::SaveSoundboardSettings {
+                guild_id,
+                guild_name,
+                sound_id,
+                sound_name,
+            } => {
+                let settings_to_persist = {
+                    let mut actions = self.soundboard_actions.lock().await;
+                    let action_state = actions.entry(context.to_owned()).or_default();
+                    action_state.action_uuid = action_uuid.to_owned();
+                    action_state.settings.guild_id = guild_id;
+                    action_state.settings.guild_name = guild_name;
+                    action_state.settings.sound_id = sound_id;
+                    action_state.settings.sound_name = sound_name;
+                    action_state.settings.clone()
+                };
+
+                self.stream_deck
+                    .set_settings(context, &settings_to_persist)
+                    .await?;
+                self.stream_deck
+                    .set_title(context, &settings_to_persist.button_title())
+                    .await?;
+            }
         }
 
         Ok(())
@@ -534,6 +901,50 @@ impl PluginState {
         Ok(client)
     }
 
+    async fn connect_screenshare_client(&self) -> Result<DiscordRpcClient> {
+        let settings = self.global_settings.lock().await.clone();
+        if settings.client_id.trim().is_empty() {
+            bail!("Discord client ID is required for screenshare RPC");
+        }
+        eprintln!("screenshare: connect attempt to Discord IPC endpoint");
+
+        if let Some(access_token) = settings.access_token_if_present() {
+            match DiscordRpcClient::connect_with_token(&settings.client_id, access_token).await {
+                Ok(client) => {
+                    eprintln!("screenshare: connect success using shared access token");
+                    return Ok(client);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "screenshare: shared token authentication failed, retrying with shared credentials: {error}"
+                    );
+                }
+            }
+        }
+
+        if !settings.has_credentials() {
+            bail!(
+                "Discord client credentials are required to authorize screenshare when no valid shared token is available"
+            );
+        }
+        if !settings.has_redirect_uri() {
+            bail!(
+                "Redirect URI is required to authorize screenshare and must match Discord Developer Portal OAuth2 redirect"
+            );
+        }
+
+        let (client, token) = DiscordRpcClient::connect_authorized(
+            &settings.client_id,
+            &settings.client_secret,
+            &settings.redirect_uri,
+            settings.access_token_if_present(),
+        )
+        .await?;
+        self.persist_access_token(&token).await?;
+        eprintln!("screenshare: connect success after shared credential authorization");
+        Ok(client)
+    }
+
     async fn clear_rpc_client(&self) {
         *self.rpc_client.lock().await = None;
     }
@@ -553,6 +964,19 @@ impl PluginState {
         }
 
         let client = self.connect_authorized_client().await?;
+        let mut rpc_client = self.rpc_client.lock().await;
+        if rpc_client.is_none() {
+            *rpc_client = Some(client);
+        }
+        Ok(())
+    }
+
+    async fn ensure_connected_screenshare_client(&self) -> Result<()> {
+        if self.rpc_client.lock().await.is_some() {
+            return Ok(());
+        }
+
+        let client = self.connect_screenshare_client().await?;
         let mut rpc_client = self.rpc_client.lock().await;
         if rpc_client.is_none() {
             *rpc_client = Some(client);
@@ -612,6 +1036,67 @@ impl PluginState {
         bail!("failed to get Discord channels")
     }
 
+    async fn rpc_get_soundboard_sounds(&self) -> Result<Vec<SoundboardSoundSummary>> {
+        for attempt in 0..2 {
+            self.ensure_connected_rpc_client().await?;
+            let result = {
+                let mut rpc_client = self.rpc_client.lock().await;
+                let client = rpc_client
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Discord RPC client is unavailable"))?;
+
+                let guilds = client.get_guilds().await?;
+                let guild_name_by_id: HashMap<String, String> = guilds
+                    .iter()
+                    .map(|guild| (guild.id.clone(), guild.name.clone()))
+                    .collect();
+
+                let mut sounds = Vec::new();
+                let mut seen = HashSet::new();
+                for guild in guilds {
+                    match client.get_soundboard_sounds(&guild.id).await {
+                        Ok(mut guild_sounds) => {
+                            for sound in &mut guild_sounds {
+                                if sound.guild_name.trim().is_empty() {
+                                    sound.guild_name = guild_name_by_id
+                                        .get(&sound.guild_id)
+                                        .cloned()
+                                        .or_else(|| guild_name_by_id.get(&guild.id).cloned())
+                                        .unwrap_or_else(|| guild.name.clone());
+                                }
+
+                                let key = format!("{}:{}", sound.guild_id, sound.sound_id);
+                                if seen.insert(key) {
+                                    sounds.push(sound.clone());
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "soundboard: failed loading sounds for guild {} ({}): {error}",
+                                guild.name, guild.id
+                            );
+                        }
+                    }
+                }
+                Ok::<Vec<SoundboardSoundSummary>, anyhow::Error>(sounds)
+            };
+
+            match result {
+                Ok(sounds) => return Ok(sounds),
+                Err(error) => {
+                    if attempt == 0 && Self::is_retryable_rpc_error(&error) {
+                        self.clear_rpc_client().await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
+        bail!("failed to get Discord soundboard sounds")
+    }
+
     async fn rpc_select_voice_channel(&self, channel_id: &str) -> Result<()> {
         for attempt in 0..2 {
             self.ensure_connected_rpc_client().await?;
@@ -662,6 +1147,64 @@ impl PluginState {
         }
 
         bail!("failed to leave Discord voice channel")
+    }
+
+    async fn rpc_toggle_screenshare(&self) -> Result<()> {
+        for attempt in 0..2 {
+            eprintln!("screenshare: connect attempt {}", attempt + 1);
+            self.ensure_connected_screenshare_client().await?;
+            let result = {
+                let mut rpc_client = self.rpc_client.lock().await;
+                let client = rpc_client
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Discord RPC client is unavailable"))?;
+                client.toggle_screenshare().await
+            };
+
+            match result {
+                Ok(()) => {
+                    eprintln!("screenshare: toggle success");
+                    return Ok(());
+                }
+                Err(error) => {
+                    eprintln!("screenshare: toggle failure on attempt {}: {error}", attempt + 1);
+                    if attempt == 0 && Self::is_retryable_rpc_error(&error) {
+                        eprintln!("screenshare: reconnect attempt after transport error");
+                        self.clear_rpc_client().await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
+        bail!("failed to toggle Discord screenshare")
+    }
+
+    async fn rpc_play_soundboard_sound(&self, guild_id: &str, sound_id: &str) -> Result<()> {
+        for attempt in 0..2 {
+            self.ensure_connected_rpc_client().await?;
+            let result = {
+                let mut rpc_client = self.rpc_client.lock().await;
+                let client = rpc_client
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("Discord RPC client is unavailable"))?;
+                client.play_soundboard_sound(guild_id, sound_id).await
+            };
+
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if attempt == 0 && Self::is_retryable_rpc_error(&error) {
+                        self.clear_rpc_client().await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
+        bail!("failed to play Discord soundboard sound")
     }
 
     async fn persist_access_token(&self, access_token: &str) -> Result<()> {
@@ -822,6 +1365,15 @@ impl PluginState {
                 .await;
         }
         Ok(())
+    }
+
+    async fn shutdown(&self) {
+        let mut rpc_client = self.rpc_client.lock().await;
+        if let Some(mut client) = rpc_client.take() {
+            if let Err(error) = client.close().await {
+                eprintln!("failed to close Discord IPC client cleanly: {error}");
+            }
+        }
     }
 }
 

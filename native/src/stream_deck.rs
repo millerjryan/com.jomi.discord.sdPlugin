@@ -101,6 +101,17 @@ impl StreamDeckClient {
         .await
     }
 
+    pub async fn set_state(&self, context: &str, state: u8) -> Result<()> {
+        self.send(json!({
+            "event": "setState",
+            "context": context,
+            "payload": {
+                "state": state,
+            }
+        }))
+        .await
+    }
+
     pub async fn show_alert(&self, context: &str) -> Result<()> {
         self.send(json!({
             "event": "showAlert",

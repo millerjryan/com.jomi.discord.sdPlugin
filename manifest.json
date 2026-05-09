@@ -42,6 +42,48 @@
           "ShowTitle": true
         }
       ]
+    },
+    {
+      "Name": "Screenshare",
+      "UUID": "com.jomi.discord.screenshare",
+      "Icon": "imgs/voice-action",
+      "Tooltip": "Toggle Discord screensharing in the local client.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/screenshare.html",
+      "States": [
+        {
+          "Image": "imgs/voice-key",
+          "Title": "Not\nSharing",
+          "TitleAlignment": "bottom",
+          "ShowTitle": true
+        },
+        {
+          "Image": "imgs/voice-key",
+          "Title": "Sharing",
+          "TitleAlignment": "bottom",
+          "ShowTitle": true
+        }
+      ]
+    },
+    {
+      "Name": "Soundboard",
+      "UUID": "com.jomi.discord.soundboard",
+      "Icon": "imgs/voice-action",
+      "Tooltip": "Play a configured Discord soundboard sound in the local client.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "ui/soundboard.html",
+      "States": [
+        {
+          "Image": "imgs/voice-key",
+          "Title": "Sound\nBoard",
+          "TitleAlignment": "bottom",
+          "ShowTitle": true
+        }
+      ]
     }
   ]
 }

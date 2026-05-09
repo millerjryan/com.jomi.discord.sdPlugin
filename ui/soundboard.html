@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Soundboard</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #10141d;
+        --panel: #171d29;
+        --panel-2: #202838;
+        --border: #2e3850;
+        --text: #eef3ff;
+        --muted: #98a5c3;
+        --accent: #5fb0ff;
+        --accent-strong: #2b8ef6;
+        --danger: #ff7b7b;
+        --success: #7dde9a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 14px;
+        background:
+          radial-gradient(circle at top right, rgba(95, 176, 255, 0.18), transparent 35%),
+          linear-gradient(180deg, #121722 0%, #0e131c 100%);
+        color: var(--text);
+        font: 13px/1.45 "Segoe UI", "Noto Sans", sans-serif;
+      }
+
+      .stack {
+        display: grid;
+        gap: 12px;
+      }
+
+      .card {
+        border: 1px solid var(--border);
+        background: linear-gradient(180deg, rgba(32, 40, 56, 0.92), rgba(23, 29, 41, 0.95));
+        border-radius: 12px;
+        padding: 12px;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+      }
+
+      h1,
+      h2,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+
+      h2 {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        color: var(--muted);
+        margin-bottom: 10px;
+      }
+
+      .intro {
+        color: var(--muted);
+        margin-top: 6px;
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+
+      label {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      input,
+      select,
+      button {
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        padding: 10px 12px;
+        color: var(--text);
+        background: rgba(11, 15, 24, 0.82);
+      }
+
+      input:focus,
+      select:focus,
+      button:focus {
+        outline: 2px solid rgba(95, 176, 255, 0.35);
+        outline-offset: 1px;
+      }
+
+      button {
+        background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+        border-color: transparent;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: rgba(19, 28, 44, 0.94);
+        border-color: var(--border);
+        font-weight: 600;
+      }
+
+      .actions {
+        display: grid;
+        gap: 8px;
+      }
+
+      .status {
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: rgba(11, 15, 24, 0.72);
+        border: 1px solid var(--border);
+        color: var(--muted);
+        min-height: 44px;
+      }
+
+      .status.success {
+        color: var(--success);
+      }
+
+      .status.error {
+        color: var(--danger);
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .debug-log {
+        min-height: 90px;
+        max-height: 180px;
+        overflow: auto;
+        margin: 0;
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: rgba(11, 15, 24, 0.72);
+        border: 1px solid var(--border);
+        color: var(--muted);
+        font: 11px/1.4 "Consolas", "Liberation Mono", monospace;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="stack">
+      <section class="card">
+        <h1>Soundboard</h1>
+        <p class="intro">Store shared Discord credentials once, then map this key to a specific soundboard sound from any server.</p>
+      </section>
+
+      <section class="card stack">
+        <div>
+          <h2>Shared OAuth</h2>
+        </div>
+        <div class="field">
+          <label for="client-id">Client ID</label>
+          <input id="client-id" type="text" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="client-secret">Client Secret</label>
+          <input id="client-secret" type="password" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="redirect-uri">Redirect URI</label>
+          <input id="redirect-uri" type="text" autocomplete="off" spellcheck="false" placeholder="http://localhost" />
+        </div>
+        <div class="actions">
+          <button id="save-credentials" type="button">Save Credentials</button>
+          <button id="connect-discord" class="secondary" type="button">Connect Discord</button>
+        </div>
+      </section>
+
+      <section class="card stack">
+        <div>
+          <h2>Target Sound</h2>
+        </div>
+        <div class="field">
+          <label for="guild-select">Server</label>
+          <select id="guild-select">
+            <option value="">Connect Discord first</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="sound-select">Soundboard Sound</label>
+          <select id="sound-select">
+            <option value="">Choose a server first</option>
+          </select>
+        </div>
+        <div class="actions">
+          <button id="refresh-sounds" class="secondary" type="button">Refresh Sounds</button>
+        </div>
+        <p class="hint">Select a server first, then choose a soundboard sound from that server.</p>
+      </section>
+
+      <section id="status" class="status">Idle.</section>
+
+      <section class="card stack">
+        <div>
+          <h2>Debug Log</h2>
+        </div>
+        <pre id="debug-log" class="debug-log">Waiting for plugin events...</pre>
+      </section>
+    </main>
+    <script src="soundboard.js"></script>
+  </body>
+</html>

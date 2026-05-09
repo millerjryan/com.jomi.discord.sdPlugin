@@ -98,3 +98,39 @@ impl ChannelSummary {
         matches!(self.kind, 2 | 13)
     }
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundboardSettings {
+    #[serde(default)]
+    pub guild_id: String,
+    #[serde(default)]
+    pub guild_name: String,
+    #[serde(default)]
+    pub sound_id: String,
+    #[serde(default)]
+    pub sound_name: String,
+}
+
+impl SoundboardSettings {
+    pub fn button_title(&self) -> String {
+        if self.sound_name.trim().is_empty() {
+            return "Sound\nBoard".to_owned();
+        }
+
+        let mut title = self.sound_name.trim().to_owned();
+        if title.len() > 18 {
+            title.truncate(18);
+        }
+        title.replace(' ', "\n")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundboardSoundSummary {
+    pub guild_id: String,
+    pub guild_name: String,
+    pub sound_id: String,
+    pub sound_name: String,
+}
